@@ -14,6 +14,19 @@ trunk serve --open          # dev server on http://127.0.0.1:8080
 
 `trunk build --release` writes a static site to `ui/dist/` that can be hosted anywhere.
 
+## Host on GitHub Pages
+
+The built site is committed in `docs/`, so the default Pages setup works with no Actions:
+
+1. Settings → Pages → *Build and deployment* → Source: **Deploy from a branch**.
+2. Branch: `main`, folder: **`/docs`** (or `/ (root)` — the root `index.html` redirects to `docs/`).
+
+After changing the UI or backend, rebuild and commit `docs/`:
+
+```sh
+ui/build-pages.sh   # trunk build --release --public-url ./ --dist ../docs
+```
+
 ## Run natively (optional)
 
 ```sh

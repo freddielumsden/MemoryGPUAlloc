@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <title>GPU Memory Allocator</title>
+    
+<script type="module">
+import init, * as bindings from './gpu_memory_alloc_ui-88d26bd2e3e34777.js';
+const wasm = await init({ module_or_path: './gpu_memory_alloc_ui-88d26bd2e3e34777_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+    <style>
+        html, body { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; background: #12151a; }
+        canvas { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #loading_text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #7d8896; font: 14px sans-serif; }
+    </style>
+<link rel="modulepreload" href="./gpu_memory_alloc_ui-88d26bd2e3e34777.js" crossorigin="anonymous" integrity="sha384-Ifa4jEnASsTfqaKod1HwwfDg0hiCV+rsrkItCJWqJaVlQ+cKqgWohMH6gS4mB3/i"><link rel="preload" href="./gpu_memory_alloc_ui-88d26bd2e3e34777_bg.wasm" crossorigin="anonymous" integrity="sha384-sCnSnbsSp22JTU0WzHad+TOX3BrTCK9+/PAK9IoNoW8iIYmu7sDDrwCPKdru8hQB" as="fetch" type="application/wasm"></head>
+<body>
+    <canvas id="the_canvas_id"></canvas>
+    <div id="loading_text">Loading…</div>
+</body>
+</html>
