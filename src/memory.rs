@@ -41,7 +41,7 @@ impl MemRef {
     pub fn read(&self, index: usize) -> Option<u8> {
         let memory = self.memory.lock().expect("failed to access memory");
 
-        if index < self.length() {
+        if index < memory.data.len() {
             Some(memory.data[index])
         } else {
             None
