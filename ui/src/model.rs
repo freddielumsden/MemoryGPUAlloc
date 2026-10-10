@@ -295,6 +295,16 @@ impl Workspace {
     }
 }
 
+/// Byte contents of every ref an online allocator has handed out, grouped by
+/// GPU. `Allocator::get_ref_vals` returns them flattened in GPU order, so this
+/// splits them using `gpu_ref_count`.
+pub fn ref_values_by_gpu(allocator: &Allocator) -> Vec<Vec<Vec<u8>>> {
+    let mut flat = allocator.get_ref_vals().into_iter();
+    (0..allocator.no_gpus())
+        .map(|gpu| flat.by_ref().take(allocator.gpu_ref_count(gpu).unwrap_or(0)).collect())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +334,8 @@ mod tests {
         let AllocatorState::Online { allocator } = &ws.allocators[0].state else { panic!() };
         assert_eq!(allocator.pool_size(), 3);
         assert_eq!(allocator.gpu_ref_count(0), None);
+        let values = ref_values_by_gpu(allocator);
+        assert_eq!(values.iter().map(Vec::len).collect::<Vec<_>>(), vec![0, 3, 2, 2, 2, 2, 2, 2]);
         assert!(ws.allocate(alloc_id, 4, 1).is_err());
     }
 

@@ -35,7 +35,9 @@ Code layout:
 
 - `src/model.rs` — owns the real backend objects and moves them via the backend's public API. No egui.
 - `src/app.rs` — panels, drag-and-drop rules, and the command queue applied after each frame.
-- `src/widgets.rs`, `src/theme.rs` — reusable widgets and the dark, rounded theme.
+- `src/tutorial.rs` — the first-run walkthrough: which step you're on and what to highlight.
+- `src/widgets.rs`, `src/theme.rs` — reusable widgets (including the orbiting tutorial outline) and the
+  light/dark palettes. Light is the default; toggle it from the header.
 
 Notes:
 

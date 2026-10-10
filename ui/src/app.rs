@@ -12,6 +12,7 @@ use crate::model::{
     AllocatorNode, AllocatorState, GpuLocation, NodeId, OpResult, PoolLocation, PoolNode, RefLocation, Workspace,
 };
 use crate::theme;
+use crate::tutorial::{Spot, Step, Tutorial};
 use crate::widgets::{self, Tile, badge, card, drop_zone, inset, section_header, wrap_grid};
 
 /// Anything that can be picked up with the mouse.
@@ -67,10 +68,10 @@ impl Kind {
 
     fn color(self) -> egui::Color32 {
         match self {
-            Kind::MemRef => theme::MEMORY,
-            Kind::MemPool => theme::POOL,
-            Kind::Gpu => theme::GPU,
-            Kind::Allocator => theme::ACCENT,
+            Kind::MemRef => theme::memory(),
+            Kind::MemPool => theme::pool(),
+            Kind::Gpu => theme::gpu(),
+            Kind::Allocator => theme::text(),
         }
     }
 }
@@ -103,6 +104,26 @@ struct UiState {
     amounts: HashMap<Kind, String>,
     alloc_inputs: HashMap<NodeId, AllocInputs>,
     commands: Vec<Command>,
+    ui_actions: Vec<UiAction>,
+    /// Tutorial spots to outline this frame, and where they ended up on screen.
+    spots: Vec<Spot>,
+    highlights: Vec<(egui::Rect, egui::Rect)>,
+}
+
+impl UiState {
+    /// Records `rect` for outlining if the tutorial wants `spot` highlighted.
+    fn mark(&mut self, ui: &Ui, spot: Spot, rect: egui::Rect) {
+        if self.spots.contains(&spot) {
+            self.highlights.push((rect, ui.clip_rect()));
+        }
+    }
+}
+
+/// Actions that only affect the presentation, not the workspace.
+enum UiAction {
+    ToggleTheme,
+    SkipTutorial,
+    RestartTutorial,
 }
 
 struct LogLine {
@@ -114,6 +135,8 @@ pub struct App {
     ws: Workspace,
     state: UiState,
     log: Vec<LogLine>,
+    tutorial: Tutorial,
+    dark: bool,
 }
 
 const TILE: egui::Vec2 = egui::vec2(58.0, 40.0);
@@ -126,8 +149,14 @@ const MAX_TILES: usize = 160;
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
-        let mut app = App { ws: Workspace::default(), state: UiState::default(), log: Vec::new() };
+        theme::apply(&cc.egui_ctx, false);
+        let mut app = App {
+            ws: Workspace::default(),
+            state: UiState::default(),
+            log: Vec::new(),
+            tutorial: Tutorial::default(),
+            dark: false,
+        };
         app.push_log(true, "Workspace ready: 18 memory refs, 1 pool, 8 GPUs, 1 allocator.".into());
         app
     }
@@ -141,9 +170,15 @@ impl App {
 
     fn apply_commands(&mut self) {
         for cmd in std::mem::take(&mut self.state.commands) {
+            let is_run = matches!(cmd, Command::Run(_));
             let (result, text) = self.execute(cmd);
             match result {
-                Ok(()) => self.push_log(true, text),
+                Ok(()) => {
+                    if is_run {
+                        self.tutorial.note_run();
+                    }
+                    self.push_log(true, text)
+                }
                 Err(e) => self.push_log(false, format!("{text}: {e}")),
             }
         }
@@ -187,10 +222,11 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let panel = egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(12));
+        let panel = egui::Frame::new().fill(theme::panel()).inner_margin(egui::Margin::same(12));
+        self.state.spots = self.tutorial.spots(&self.ws);
 
         egui::TopBottomPanel::top("memory_blocks").frame(panel).show(ctx, |ui| {
-            header_bar(ui, &self.ws);
+            header_bar(ui, &self.ws, &self.tutorial, self.dark, &mut self.state);
             ui.add_space(8.0);
             memory_tray(ui, &self.ws, &mut self.state);
         });
@@ -208,8 +244,12 @@ impl eframe::App for App {
             .show(ctx, |ui| event_log(ui, &self.log));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(14)))
+            .frame(egui::Frame::new().fill(theme::bg()).inner_margin(egui::Margin::same(14)))
             .show(ctx, |ui| {
+                if self.tutorial.is_visible() {
+                    tutorial_banner(ui, &self.tutorial, &mut self.state);
+                    ui.add_space(12.0);
+                }
                 ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     pools_section(ui, &self.ws, &mut self.state);
                     ui.add_space(14.0);
@@ -220,6 +260,47 @@ impl eframe::App for App {
             });
 
         self.apply_commands();
+        self.apply_ui_actions(ctx);
+        self.tutorial.update(&self.ws);
+        self.paint_highlights(ctx);
+    }
+}
+
+impl App {
+    fn apply_ui_actions(&mut self, ctx: &egui::Context) {
+        for action in std::mem::take(&mut self.state.ui_actions) {
+            match action {
+                UiAction::ToggleTheme => {
+                    self.dark = !self.dark;
+                    theme::apply(ctx, self.dark);
+                }
+                UiAction::SkipTutorial => self.tutorial.hide(),
+                UiAction::RestartTutorial => {
+                    self.ws = Workspace::default();
+                    self.state.alloc_inputs.clear();
+                    self.tutorial = Tutorial::default();
+                    self.push_log(true, "Workspace reset; walkthrough restarted.".into());
+                }
+            }
+        }
+    }
+
+    /// Draws the tutorial outlines. Every outline uses the same phase, taken
+    /// from the frame clock, so simultaneous highlights orbit in sync.
+    fn paint_highlights(&mut self, ctx: &egui::Context) {
+        let highlights = std::mem::take(&mut self.state.highlights);
+        if highlights.is_empty() {
+            return;
+        }
+        const PERIOD_SECS: f64 = 2.4;
+        let phase = (ctx.input(|i| i.time) / PERIOD_SECS).fract() as f32;
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("tutorial_outline")));
+        for (rect, clip) in highlights {
+            let rect = rect.expand(3.0);
+            let painter = painter.with_clip_rect(clip.expand(6.0));
+            widgets::orbit_outline(&painter, rect, theme::CARD_RADIUS as f32 + 3.0, phase, theme::accent());
+        }
+        ctx.request_repaint();
     }
 }
 
@@ -291,7 +372,7 @@ fn target_zone<R>(
     frame: egui::Frame,
     target: Target,
     add_contents: impl FnOnce(&mut Ui, &mut UiState) -> R,
-) -> R {
+) -> egui::InnerResponse<R> {
     let (inner, dropped) = drop_zone(ui, frame, |d: &Drag| accepts(ws, target, d), |ui| add_contents(ui, state));
     if let Some(drag) = dropped {
         state.commands.push(Command::Drop(drag, target));
@@ -299,26 +380,77 @@ fn target_zone<R>(
     inner
 }
 
+// ------------------------------------------------------------------ tutorial
+
+fn tutorial_banner(ui: &mut Ui, tutorial: &Tutorial, state: &mut UiState) {
+    let (current, total) = tutorial.progress();
+    let (title, body) = tutorial.text();
+    let done = tutorial.step() == Step::Done;
+    card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            let label = if done { "GUIDE · DONE".to_string() } else { format!("GUIDE · {current:02}/{total:02}") };
+            ui.label(RichText::new(label).monospace().color(theme::text_dim()));
+            // Dot progress indicator.
+            let (rect, _) = ui.allocate_exact_size(vec2(total as f32 * 12.0, 12.0), egui::Sense::hover());
+            for i in 0..total {
+                let centre = rect.left_center() + vec2(6.0 + i as f32 * 12.0, 0.0);
+                if done || i + 1 < current {
+                    ui.painter().circle_filled(centre, 3.0, theme::text());
+                } else if i + 1 == current {
+                    ui.painter().circle_filled(centre, 3.0, theme::accent());
+                } else {
+                    ui.painter().circle_stroke(centre, 2.5, egui::Stroke::new(1.0_f32, theme::border()));
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if done {
+                    if ui.button("CLOSE").clicked() {
+                        state.ui_actions.push(UiAction::SkipTutorial);
+                    }
+                    if ui.button("RESTART").clicked() {
+                        state.ui_actions.push(UiAction::RestartTutorial);
+                    }
+                } else if ui.button("SKIP").clicked() {
+                    state.ui_actions.push(UiAction::SkipTutorial);
+                }
+            });
+        });
+        ui.label(RichText::new(title).strong().size(15.0).color(theme::text()));
+        ui.label(RichText::new(body).color(theme::text_dim()));
+    });
+}
+
 // ------------------------------------------------------------------ top bar
 
-fn header_bar(ui: &mut Ui, ws: &Workspace) {
+fn header_bar(ui: &mut Ui, ws: &Workspace, tutorial: &Tutorial, dark: bool, state: &mut UiState) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("GPU MEMORY ALLOCATOR").strong().size(16.0).color(theme::TEXT));
-        ui.label(RichText::new("control console").color(theme::TEXT_DIM));
+        ui.label(RichText::new("GPU MEMORY ALLOCATOR").strong().size(16.0).color(theme::text()));
+        ui.label(RichText::new("control console").color(theme::text_dim()));
         ui.add_space(12.0);
         let online = ws.allocators.iter().filter(|a| matches!(a.state, AllocatorState::Online { .. })).count();
-        stat(ui, "BLOCKS FREE", ws.tray.len(), theme::MEMORY);
-        stat(ui, "POOLS", ws.pools.len(), theme::POOL);
-        stat(ui, "GPUS FREE", ws.rack.len(), theme::GPU);
-        stat(ui, "ALLOCATORS", ws.allocators.len(), theme::ACCENT);
-        stat(ui, "ONLINE", online, theme::ACCENT);
+        stat(ui, "BLOCKS FREE", ws.tray.len(), theme::memory());
+        stat(ui, "POOLS", ws.pools.len(), theme::pool());
+        stat(ui, "GPUS FREE", ws.rack.len(), theme::gpu());
+        stat(ui, "ALLOCATORS", ws.allocators.len(), theme::text());
+        stat(ui, "ONLINE", online, theme::text());
+        ui.add_space(12.0);
+        let toggle = if dark { "LIGHT MODE" } else { "DARK MODE" };
+        if ui.button(toggle).clicked() {
+            state.ui_actions.push(UiAction::ToggleTheme);
+        }
+        if !tutorial.is_visible()
+            && ui.button("TUTORIAL").on_hover_text("Reset the workspace and restart the walkthrough").clicked()
+        {
+            state.ui_actions.push(UiAction::RestartTutorial);
+        }
     });
 }
 
 fn stat(ui: &mut Ui, label: &str, value: usize, color: egui::Color32) {
     inset().inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(label).small().color(theme::TEXT_DIM));
+            ui.label(RichText::new(label).small().color(theme::text_dim()));
             ui.label(RichText::new(value.to_string()).monospace().strong().color(color));
         });
     });
@@ -327,7 +459,7 @@ fn stat(ui: &mut Ui, label: &str, value: usize, color: egui::Color32) {
 fn memory_tray(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
     section_header(ui, "Memory blocks · loose MemRefs", "drag a block into a pool");
     let frame = inset().inner_margin(egui::Margin::same(10));
-    target_zone(ui, ws, state, frame, Target::Tray, |ui, _| {
+    target_zone(ui, ws, state, frame, Target::Tray, |ui, state| {
         ui.set_width(ui.available_width());
         ScrollArea::vertical().id_salt("tray_scroll").max_height(104.0).show(ui, |ui| {
             if ws.tray.is_empty() {
@@ -335,16 +467,20 @@ fn memory_tray(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
                     RichText::new(
                         "No loose memory refs. Add some from the Components panel, or drag one back out of a pool.",
                     )
-                    .color(theme::TEXT_DIM),
+                    .color(theme::text_dim()),
                 );
                 return;
             }
             ui.horizontal_wrapped(|ui| {
                 for (i, mem_ref) in ws.tray.iter().take(MAX_TILES).enumerate() {
                     let size = format!("{} B", mem_ref.length());
-                    Tile { size: TILE, color: theme::MEMORY, title: "REF", subtitle: &size, led: None }
-                        .show_draggable(ui, Id::new(("tray_ref", i)), Drag::Ref(RefLocation::Tray))
-                        .on_hover_text("MemRef — drag into a MemPool");
+                    let response =
+                        Tile { size: TILE, color: theme::memory(), title: "REF", subtitle: &size, led: None }
+                            .show_draggable(ui, Id::new(("tray_ref", i)), Drag::Ref(RefLocation::Tray))
+                            .on_hover_text("MemRef — drag into a MemPool");
+                    if i == 0 {
+                        state.mark(ui, Spot::FirstTrayRef, response.rect);
+                    }
                 }
                 overflow_note(ui, ws.tray.len());
             });
@@ -354,7 +490,7 @@ fn memory_tray(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
 
 fn overflow_note(ui: &mut Ui, total: usize) {
     if total > MAX_TILES {
-        ui.label(RichText::new(format!("+{} more", total - MAX_TILES)).color(theme::TEXT_DIM));
+        ui.label(RichText::new(format!("+{} more", total - MAX_TILES)).color(theme::text_dim()));
     }
 }
 
@@ -366,7 +502,7 @@ fn pools_section(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
     target_zone(ui, ws, state, frame, Target::PoolsArea, |ui, state| {
         ui.set_width(ui.available_width());
         if ws.pools.is_empty() {
-            ui.label(RichText::new("No pools. Add one from the Components panel.").color(theme::TEXT_DIM));
+            ui.label(RichText::new("No pools. Add one from the Components panel.").color(theme::text_dim()));
         }
         wrap_grid(ui, ws.pools.len(), POOL_CARD_WIDTH, |ui, i| pool_card(ui, ws, state, &ws.pools[i]));
     });
@@ -375,67 +511,77 @@ fn pools_section(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
 fn pool_card(ui: &mut Ui, ws: &Workspace, state: &mut UiState, node: &PoolNode) {
     let id = node.id;
     let size = node.pool.size();
-    target_zone(ui, ws, state, card(), Target::Pool(id), |ui, _| {
+    let card_rect = target_zone(ui, ws, state, card(), Target::Pool(id), |ui, state| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.dnd_drag_source(Id::new(("pool_handle", id)), Drag::Pool(id), |ui| {
-                badge(ui, &format!("☰ MEMPOOL #{id}"), theme::POOL)
+                badge(ui, &format!("☰ MEMPOOL #{id}"), theme::pool())
             })
             .response
             .on_hover_text("Drag the pool into an allocator's pool slot");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("{size} refs")).monospace().color(theme::TEXT));
+                ui.label(RichText::new(format!("{size} refs")).monospace().color(theme::text()));
             });
         });
         ui.add_space(4.0);
-        inset().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.set_min_height(SMALL_TILE.y);
-            if node.pool.is_empty() {
-                ui.label(RichText::new("empty — drop memory blocks here").color(theme::TEXT_DIM).small());
-                return;
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                for i in 0..size.min(MAX_TILES) {
-                    Tile { size: SMALL_TILE, color: theme::MEMORY, title: "", subtitle: "", led: None }
-                        .show_draggable(ui, Id::new(("pool_ref", id, i)), Drag::Ref(RefLocation::Pool(id)))
-                        .on_hover_text("MemRef — drag to another pool or back to memory blocks");
+        let inset_rect = inset()
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(SMALL_TILE.y);
+                if node.pool.is_empty() {
+                    ui.label(RichText::new("empty — drop memory blocks here").color(theme::text_dim()).small());
+                    return;
                 }
-                overflow_note(ui, size);
-            });
-        });
-    });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                    for i in 0..size.min(MAX_TILES) {
+                        Tile { size: SMALL_TILE, color: theme::memory(), title: "", subtitle: "", led: None }
+                            .show_draggable(ui, Id::new(("pool_ref", id, i)), Drag::Ref(RefLocation::Pool(id)))
+                            .on_hover_text("MemRef — drag to another pool or back to memory blocks");
+                    }
+                    overflow_note(ui, size);
+                });
+            })
+            .response
+            .rect;
+        state.mark(ui, Spot::PoolInset(id), inset_rect);
+    })
+    .response
+    .rect;
+    state.mark(ui, Spot::PoolCard(id), card_rect);
 }
 
 fn rack_section(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
     section_header(ui, "GPU rack · unassigned", &format!("{} GPUs", ws.rack.len()));
     let frame = inset().inner_margin(egui::Margin::same(10));
-    target_zone(ui, ws, state, frame, Target::Rack, |ui, _| {
+    target_zone(ui, ws, state, frame, Target::Rack, |ui, state| {
         ui.set_width(ui.available_width());
         if ws.rack.is_empty() {
-            ui.label(RichText::new("No free GPUs. Add some from the Components panel.").color(theme::TEXT_DIM));
+            ui.label(RichText::new("No free GPUs. Add some from the Components panel.").color(theme::text_dim()));
             return;
         }
         ui.horizontal_wrapped(|ui| {
             for (i, gpu) in ws.rack.iter().take(MAX_TILES).enumerate() {
-                gpu_tile(ui, Id::new(("rack_gpu", i)), GpuLocation::Rack, gpu.is_available(), "");
+                let response = gpu_tile(ui, Id::new(("rack_gpu", i)), GpuLocation::Rack, gpu.is_available(), "");
+                if i == 0 {
+                    state.mark(ui, Spot::FirstRackGpu, response.rect);
+                }
             }
             overflow_note(ui, ws.rack.len());
         });
     });
 }
 
-fn gpu_tile(ui: &mut Ui, id: Id, location: GpuLocation, available: bool, subtitle: &str) {
-    Tile { size: TILE, color: theme::GPU, title: "GPU", subtitle, led: Some(available) }
+fn gpu_tile(ui: &mut Ui, id: Id, location: GpuLocation, available: bool, subtitle: &str) -> egui::Response {
+    Tile { size: TILE, color: theme::gpu(), title: "GPU", subtitle, led: Some(available) }
         .show_draggable(ui, id, Drag::Gpu(location))
-        .on_hover_text(if available { "GPU — available" } else { "GPU — busy" });
+        .on_hover_text(if available { "GPU — available" } else { "GPU — busy" })
 }
 
 fn allocators_section(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
     section_header(ui, "Allocators", &format!("{} total", ws.allocators.len()));
     if ws.allocators.is_empty() {
-        ui.label(RichText::new("No allocators. Add one from the Components panel.").color(theme::TEXT_DIM));
+        ui.label(RichText::new("No allocators. Add one from the Components panel.").color(theme::text_dim()));
     }
     for node in &ws.allocators {
         allocator_card(ui, ws, state, node);
@@ -448,10 +594,10 @@ fn allocator_card(ui: &mut Ui, ws: &Workspace, state: &mut UiState, node: &Alloc
     card().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("ALLOCATOR #{id}")).strong().size(14.0).color(theme::ACCENT));
+            ui.label(RichText::new(format!("ALLOCATOR #{id}")).strong().size(14.0).color(theme::text()));
             match node.state {
-                AllocatorState::Staging { .. } => badge(ui, "STAGING", theme::ACCENT),
-                AllocatorState::Online { .. } => badge(ui, "ONLINE", theme::GPU),
+                AllocatorState::Staging { .. } => badge(ui, "STAGING", theme::text_dim()),
+                AllocatorState::Online { .. } => badge(ui, "ONLINE", theme::gpu()),
             };
         });
         ui.add_space(6.0);
@@ -487,24 +633,26 @@ fn staging_body(ui: &mut Ui, ws: &Workspace, state: &mut UiState, id: NodeId, gp
 
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
-        if ui.button(RichText::new("▶ Initialise").strong()).clicked() {
+        let response = ui.button(RichText::new("▶ Initialise").strong());
+        state.mark(ui, Spot::Initialise(id), response.rect);
+        if response.clicked() {
             state.commands.push(Command::Initialise(id));
         }
         ui.label(
             RichText::new("Calls Allocator::new(gpus, pool). The configuration is locked afterwards.")
                 .small()
-                .color(theme::TEXT_DIM),
+                .color(theme::text_dim()),
         );
     });
 }
 
 fn staged_gpus_slot(ui: &mut Ui, ws: &Workspace, state: &mut UiState, id: NodeId, gpus: &[GPU]) {
-    ui.label(RichText::new(format!("GPUS · Vec<GPU> · {}", gpus.len())).small().strong().color(theme::TEXT_DIM));
-    target_zone(ui, ws, state, inset(), Target::AllocGpus(id), |ui, _| {
+    ui.label(RichText::new(format!("GPUS · Vec<GPU> · {}", gpus.len())).small().strong().color(theme::text_dim()));
+    let rect = target_zone(ui, ws, state, inset(), Target::AllocGpus(id), |ui, _| {
         ui.set_width(ui.available_width());
         ui.set_min_height(TILE.y);
         if gpus.is_empty() {
-            ui.label(RichText::new("drop GPUs here from the rack").color(theme::TEXT_DIM));
+            ui.label(RichText::new("drop GPUs here from the rack").color(theme::text_dim()));
             return;
         }
         ui.horizontal_wrapped(|ui| {
@@ -514,44 +662,51 @@ fn staged_gpus_slot(ui: &mut Ui, ws: &Workspace, state: &mut UiState, id: NodeId
             }
             overflow_note(ui, gpus.len());
         });
-    });
+    })
+    .response
+    .rect;
+    state.mark(ui, Spot::AllocGpuSlot(id), rect);
 }
 
 fn staged_pool_slot(ui: &mut Ui, ws: &Workspace, state: &mut UiState, id: NodeId, pool: Option<&PoolNode>) {
-    ui.label(RichText::new("POOL · MemPool").small().strong().color(theme::TEXT_DIM));
-    target_zone(ui, ws, state, inset(), Target::AllocPoolSlot(id), |ui, state| {
+    ui.label(RichText::new("POOL · MemPool").small().strong().color(theme::text_dim()));
+    let rect = target_zone(ui, ws, state, inset(), Target::AllocPoolSlot(id), |ui, state| {
         ui.set_width(ui.available_width());
         ui.set_min_height(TILE.y);
         match pool {
             Some(node) => pool_card(ui, ws, state, node),
             None => {
-                ui.label(RichText::new("drop a MemPool here").color(theme::TEXT_DIM));
+                ui.label(RichText::new("drop a MemPool here").color(theme::text_dim()));
             }
         }
-    });
+    })
+    .response
+    .rect;
+    state.mark(ui, Spot::AllocPoolSlot(id), rect);
 }
 
 fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocator) {
     let pool_size = allocator.pool_size();
     // Internal pool: drag a token from it onto a GPU to allocate one ref.
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("INTERNAL POOL").small().strong().color(theme::TEXT_DIM));
+        ui.label(RichText::new("INTERNAL POOL").small().strong().color(theme::text_dim()));
         if pool_size > 0 {
-            Tile { size: TILE, color: theme::POOL, title: &pool_size.to_string(), subtitle: "refs", led: None }
+            Tile { size: TILE, color: theme::pool(), title: &pool_size.to_string(), subtitle: "refs", led: None }
                 .show_draggable(ui, Id::new(("pool_token", id)), Drag::PoolToken(id))
                 .on_hover_text("Drag onto a GPU to allocate(1, gpu)");
-            ui.label(RichText::new("drag onto a GPU to allocate one ref").small().color(theme::TEXT_DIM));
+            ui.label(RichText::new("drag onto a GPU to allocate one ref").small().color(theme::text_dim()));
         } else {
-            Tile { size: TILE, color: theme::BORDER, title: "0", subtitle: "refs", led: None }.show(ui);
-            ui.label(RichText::new("pool exhausted").small().color(theme::TEXT_DIM));
+            Tile { size: TILE, color: theme::border(), title: "0", subtitle: "refs", led: None }.show(ui);
+            ui.label(RichText::new("pool exhausted").small().color(theme::text_dim()));
         }
     });
     ui.add_space(6.0);
 
     let gpu_count = allocator.no_gpus();
     if gpu_count == 0 {
-        ui.label(RichText::new("This allocator was initialised without GPUs.").color(theme::TEXT_DIM));
+        ui.label(RichText::new("This allocator was initialised without GPUs.").color(theme::text_dim()));
     }
+    let values = crate::model::ref_values_by_gpu(allocator);
     wrap_grid(ui, gpu_count, GPU_CELL_WIDTH, |ui, gpu| {
         let refs = allocator.gpu_ref_count(gpu).unwrap_or(0);
         let (_, dropped) = drop_zone(
@@ -561,15 +716,15 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
             |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("GPU {gpu}")).monospace().strong().color(theme::GPU));
+                    ui.label(RichText::new(format!("GPU {gpu}")).monospace().strong().color(theme::gpu()));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.small_button("Free").on_hover_text(format!("deallocate({gpu})")).clicked() {
                             state.commands.push(Command::Deallocate(id, gpu));
                         }
                     });
                 });
-                ui.label(RichText::new(format!("{refs} refs")).small().color(theme::TEXT_DIM));
-                ref_meter(ui, refs);
+                ui.label(RichText::new(format!("{refs} refs")).small().color(theme::text_dim()));
+                ref_swatches(ui, &values[gpu]);
             },
         );
         if let Some(drag) = dropped {
@@ -580,10 +735,11 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
     ui.add_space(8.0);
     let inputs = state.alloc_inputs.entry(id).or_default();
     let mut queued = Vec::new();
+    let mut run_rect = None;
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("SIZE").small().strong().color(theme::TEXT_DIM));
+        ui.label(RichText::new("SIZE").small().strong().color(theme::text_dim()));
         let size = widgets::count_input(ui, &mut inputs.size);
-        ui.label(RichText::new("GPU").small().strong().color(theme::TEXT_DIM));
+        ui.label(RichText::new("GPU").small().strong().color(theme::text_dim()));
         inputs.gpu = inputs.gpu.min(gpu_count.saturating_sub(1));
         egui::ComboBox::from_id_salt(("gpu_pick", id)).width(56.0).selected_text(inputs.gpu.to_string()).show_ui(
             ui,
@@ -604,24 +760,53 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
         if ui.add_enabled(gpu_count > 0, egui::Button::new("Deallocate")).clicked() {
             queued.push(Command::Deallocate(id, inputs.gpu));
         }
-        if ui.button("▶ Run").on_hover_text("Allocator::run()").clicked() {
+        let response = ui.button("▶ Run").on_hover_text("Allocator::run()");
+        run_rect = Some(response.rect);
+        if response.clicked() {
             queued.push(Command::Run(id));
         }
     });
     state.commands.extend(queued);
+    if let Some(rect) = run_rect {
+        state.mark(ui, Spot::Run(id), rect);
+    }
 }
 
-/// Row of small squares showing how many refs a GPU holds.
-fn ref_meter(ui: &mut Ui, refs: usize) {
-    const SHOWN: usize = 12;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), egui::Sense::hover());
-    let cell = (rect.width() / SHOWN as f32).min(11.0);
-    for i in 0..SHOWN {
-        let r = egui::Rect::from_min_size(rect.min + vec2(i as f32 * cell, 0.0), vec2(cell - 2.0, 8.0));
-        let filled = i < refs.min(SHOWN);
-        let color = if filled { theme::MEMORY } else { theme::BORDER };
-        ui.painter().rect_filled(r, 2.0, color);
+/// One swatch per memory ref a GPU holds. Each swatch is split into one
+/// segment per byte, coloured by that byte's value (see `byte_colour`), so a
+/// `run()` that rewrites memory is visible as a colour change.
+fn ref_swatches(ui: &mut Ui, refs: &[Vec<u8>]) {
+    const SWATCH: egui::Vec2 = egui::vec2(18.0, 18.0);
+    if refs.is_empty() {
+        let (rect, _) = ui.allocate_exact_size(vec2(SWATCH.x, SWATCH.y), egui::Sense::hover());
+        ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0_f32, theme::border()), egui::StrokeKind::Inside);
+        return;
     }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+        for (i, bytes) in refs.iter().take(MAX_TILES).enumerate() {
+            let (rect, response) = ui.allocate_exact_size(SWATCH, egui::Sense::hover());
+            let painter = ui.painter().with_clip_rect(rect);
+            let n = bytes.len().max(1);
+            // 2×2 for the usual 4-byte ref, vertical stripes otherwise.
+            let (cols, rows) = if n == 4 { (2, 2) } else { (n, 1) };
+            let cell = vec2(rect.width() / cols as f32, rect.height() / rows as f32);
+            for (b, &value) in bytes.iter().enumerate() {
+                let min = rect.min + vec2((b % cols) as f32 * cell.x, (b / cols) as f32 * cell.y);
+                painter.rect_filled(egui::Rect::from_min_size(min, cell), 0.0, byte_colour(value));
+            }
+            ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0_f32, theme::border()), egui::StrokeKind::Inside);
+            response.on_hover_text(format!("ref {i}: {bytes:?}"));
+        }
+        overflow_note(ui, refs.len());
+    });
+}
+
+/// Maps a byte onto RGB by splitting its 8 bits across the channels
+/// (3 bits red, 3 bits green, 2 bits blue — RGB332), each scaled to 0–255.
+fn byte_colour(value: u8) -> egui::Color32 {
+    let scale = |bits: u8, max: u8| (bits as u16 * 255 / max as u16) as u8;
+    egui::Color32::from_rgb(scale(value >> 5, 7), scale((value >> 2) & 0b111, 7), scale(value & 0b11, 3))
 }
 
 // ------------------------------------------------------------------ side panel
@@ -642,10 +827,10 @@ fn components_panel(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
                 ui.label(RichText::new(kind.name()).strong().color(kind.color()));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(count.to_string()).monospace().strong());
-                    ui.label(RichText::new(count_label).small().color(theme::TEXT_DIM));
+                    ui.label(RichText::new(count_label).small().color(theme::text_dim()));
                 });
             });
-            ui.label(RichText::new(kind.path()).monospace().small().color(theme::TEXT_DIM));
+            ui.label(RichText::new(kind.path()).monospace().small().color(theme::text_dim()));
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 let text = state.amounts.entry(kind).or_insert_with(|| "1".into());
@@ -668,7 +853,7 @@ fn components_panel(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
              rack GPUs, and the newest allocators (staged parts are returned; online ones are dropped).",
         )
         .small()
-        .color(theme::TEXT_DIM),
+        .color(theme::text_dim()),
     );
 }
 
@@ -681,7 +866,7 @@ fn event_log(ui: &mut Ui, log: &[LogLine]) {
         ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             for line in log {
                 ui.horizontal(|ui| {
-                    let (tag, color) = if line.ok { ("OK ", theme::GPU) } else { ("ERR", theme::DANGER) };
+                    let (tag, color) = if line.ok { ("OK ", theme::gpu()) } else { ("ERR", theme::danger()) };
                     ui.label(RichText::new(tag).monospace().strong().color(color));
                     ui.label(RichText::new(&line.text).monospace());
                 });

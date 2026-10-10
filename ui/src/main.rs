@@ -3,6 +3,7 @@
 mod app;
 mod model;
 mod theme;
+mod tutorial;
 mod widgets;
 
 #[cfg(not(target_arch = "wasm32"))]
