@@ -9,3 +9,4 @@
 
 ## Ownership is a one way relationship to ensure that memory and GPUs are only accessed by entities which are allowed to access them.
 ## The configuration is intentionally not able to be changed after initialisation.
+## GPU Groups with types of PreFill, MidFill, Decode etc. might be added in the future

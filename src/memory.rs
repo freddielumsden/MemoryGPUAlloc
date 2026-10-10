@@ -1,14 +1,14 @@
+use std::sync::Mutex;
+
 const MEMORY_SIZE: usize = 1024;
 
 struct Memory {
     data: Vec<u8>,
 }
 
-
-
 // A reference to a sizeable unit of memory, which is given to a GPU
 pub struct MemRef {
-    memory: Memory,
+    memory: Mutex<Memory>,
 }
 
 pub struct MemPool {
@@ -29,26 +29,30 @@ impl Memory {
 impl MemRef {
     pub fn new() -> Self {
         MemRef {
-            memory: Memory::new(MEMORY_SIZE),
+            memory: Mutex::new(Memory::new(MEMORY_SIZE)),
         }
     }
 
     pub fn length(&self) -> usize {
-        self.memory.length()
+        let memory = self.memory.lock().expect("failed to access memory");
+        memory.length()
     }
 
     pub fn read(&self, index: usize) -> Option<u8> {
+        let memory = self.memory.lock().expect("failed to access memory");
+
         if index < self.length() {
-            Some(self.memory.data[index])
+            Some(memory.data[index])
         } else {
             None
         }
     }
 
     pub fn write(&mut self, index: usize, value: u8) -> Result<(), &'static str> {
+        let mut memory = self.memory.lock().expect("failed to access memory");
         let length = self.length();
         if index < self.length() {
-            self.memory.data[length] = value;
+            memory.data[length] = value;
             Ok(())
         } else {
             Err("Index out of bounds")
@@ -56,13 +60,15 @@ impl MemRef {
     }
 
     pub fn map(&mut self, f: impl Fn(u8) -> u8) {
-        for byte in &mut self.memory.data {
+        let mut memory = self.memory.lock().expect("failed to access memory");
+        for byte in &mut memory.data {
             *byte = f(*byte);
         }
     }
 
     pub fn fill(&mut self, value: u8) {
-        for byte in &mut self.memory.data {
+        let mut memory = self.memory.lock().expect("failed to access memory");
+        for byte in &mut memory.data {
             *byte = value;
         }
     }

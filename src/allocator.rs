@@ -13,6 +13,18 @@ impl Allocator {
         Allocator { gpus, pool: memory_pool, map: HashMap::new() }
     }
 
+    pub fn pool_size(&self) -> usize {
+        self.pool.size()
+    }
+
+    pub fn no_gpus(&self) -> usize {
+        self.gpus.len()
+    }
+
+    pub fn gpu_ref_count(&self, gpu_index: usize) -> Option<usize> {
+        self.map.get(&gpu_index).map(|v| v.len())
+    }
+
     pub fn allocate(&mut self, size: usize, gpu_index: usize) -> Option<()> {
         if gpu_index >= self.gpus.len()
         || size > self.pool.size() {
