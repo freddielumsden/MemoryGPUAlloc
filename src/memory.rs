@@ -50,9 +50,9 @@ impl MemRef {
 
     pub fn write(&mut self, index: usize, value: u8) -> Result<(), &'static str> {
         let mut memory = self.memory.lock().expect("failed to access memory");
-        let length = self.length();
-        if index < self.length() {
-            memory.data[length] = value;
+        let length = memory.data.len();
+        if index < length {
+            memory.data[index] = value;
             Ok(())
         } else {
             Err("Index out of bounds")
