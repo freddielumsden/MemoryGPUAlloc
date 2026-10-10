@@ -1,4 +1,6 @@
 use crate::memory::MemRef;
+use rand::rngs::SmallRng;
+use rand::RngExt;
 
 pub struct GPU {
     is_available: bool,
@@ -17,11 +19,21 @@ impl GPU {
         self.is_available = available;
     }
 
-    pub fn run(&mut self, memory: Vec<MemRef>) -> Vec<MemRef> {
+    pub fn run(&mut self, memory: &mut Vec<MemRef>) {
         self.set_availability(false);
-        println!("Running with {:?} memory references", memory.len());
-        self.set_availability(true);
 
-        memory
+        for mem in memory {
+            mem.map(randomise)
+        }
+
+        self.set_availability(true);
     }
+
+}
+
+fn randomise(x: u8) -> u8 {
+    let mut rng: SmallRng = rand::make_rng();
+    let value: u8 = rng.random_range(0..=255);
+
+    value
 }

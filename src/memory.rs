@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-const MEMORY_SIZE: usize = 1024;
+const MEMORY_SIZE: usize = 4;
 
 struct Memory {
     data: Vec<u8>,

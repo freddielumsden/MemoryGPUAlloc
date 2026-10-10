@@ -80,8 +80,8 @@ impl Allocator {
 
     pub fn run(&mut self) {
         for gpu_index in 0..self.gpus.len() {
-            if let Some(mem_refs) = self.map.remove(&gpu_index) {
-                self.map.insert(gpu_index, self.gpus[gpu_index].run(mem_refs));
+            if let Some(mem_refs) = self.map.get_mut(&gpu_index) {
+                self.gpus[gpu_index].run(mem_refs);
             }
         }
     }
