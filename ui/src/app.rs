@@ -706,6 +706,7 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
     if gpu_count == 0 {
         ui.label(RichText::new("This allocator was initialised without GPUs.").color(theme::text_dim()));
     }
+    let values = crate::model::ref_values_by_gpu(allocator);
     wrap_grid(ui, gpu_count, GPU_CELL_WIDTH, |ui, gpu| {
         let refs = allocator.gpu_ref_count(gpu).unwrap_or(0);
         let (_, dropped) = drop_zone(
@@ -723,7 +724,7 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
                     });
                 });
                 ui.label(RichText::new(format!("{refs} refs")).small().color(theme::text_dim()));
-                ref_meter(ui, refs);
+                ref_swatches(ui, &values[gpu]);
             },
         );
         if let Some(drag) = dropped {
@@ -771,17 +772,41 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
     }
 }
 
-/// Row of small squares showing how many refs a GPU holds.
-fn ref_meter(ui: &mut Ui, refs: usize) {
-    const SHOWN: usize = 12;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), egui::Sense::hover());
-    let cell = (rect.width() / SHOWN as f32).min(11.0);
-    for i in 0..SHOWN {
-        let r = egui::Rect::from_min_size(rect.min + vec2(i as f32 * cell, 0.0), vec2(cell - 2.0, 8.0));
-        let filled = i < refs.min(SHOWN);
-        let color = if filled { theme::memory() } else { theme::border() };
-        ui.painter().rect_filled(r, 2.0, color);
+/// One swatch per memory ref a GPU holds. Each swatch is split into one
+/// segment per byte, coloured by that byte's value (see `byte_colour`), so a
+/// `run()` that rewrites memory is visible as a colour change.
+fn ref_swatches(ui: &mut Ui, refs: &[Vec<u8>]) {
+    const SWATCH: egui::Vec2 = egui::vec2(18.0, 18.0);
+    if refs.is_empty() {
+        let (rect, _) = ui.allocate_exact_size(vec2(SWATCH.x, SWATCH.y), egui::Sense::hover());
+        ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0_f32, theme::border()), egui::StrokeKind::Inside);
+        return;
     }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+        for (i, bytes) in refs.iter().take(MAX_TILES).enumerate() {
+            let (rect, response) = ui.allocate_exact_size(SWATCH, egui::Sense::hover());
+            let painter = ui.painter().with_clip_rect(rect);
+            let n = bytes.len().max(1);
+            // 2×2 for the usual 4-byte ref, vertical stripes otherwise.
+            let (cols, rows) = if n == 4 { (2, 2) } else { (n, 1) };
+            let cell = vec2(rect.width() / cols as f32, rect.height() / rows as f32);
+            for (b, &value) in bytes.iter().enumerate() {
+                let min = rect.min + vec2((b % cols) as f32 * cell.x, (b / cols) as f32 * cell.y);
+                painter.rect_filled(egui::Rect::from_min_size(min, cell), 0.0, byte_colour(value));
+            }
+            ui.painter().rect_stroke(rect, 2.0, egui::Stroke::new(1.0_f32, theme::border()), egui::StrokeKind::Inside);
+            response.on_hover_text(format!("ref {i}: {bytes:?}"));
+        }
+        overflow_note(ui, refs.len());
+    });
+}
+
+/// Maps a byte onto RGB by splitting its 8 bits across the channels
+/// (3 bits red, 3 bits green, 2 bits blue — RGB332), each scaled to 0–255.
+fn byte_colour(value: u8) -> egui::Color32 {
+    let scale = |bits: u8, max: u8| (bits as u16 * 255 / max as u16) as u8;
+    egui::Color32::from_rgb(scale(value >> 5, 7), scale((value >> 2) & 0b111, 7), scale(value & 0b11, 3))
 }
 
 // ------------------------------------------------------------------ side panel
