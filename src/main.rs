@@ -1,6 +1,5 @@
 pub mod memory;
 pub mod gpu;
-pub mod group;
 pub mod allocator;
 
 use memory::{MemRef, MemPool};

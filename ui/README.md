@@ -37,9 +37,7 @@ Code layout:
 - `src/app.rs` — panels, drag-and-drop rules, and the command queue applied after each frame.
 - `src/widgets.rs`, `src/theme.rs` — reusable widgets and the dark, rounded theme.
 
-Notes on current backend limits:
+Notes:
 
-- `Allocator` has no getters, so the UI keeps a display-only mirror of pool size and per-GPU ref counts,
-  updated only when a backend call succeeds.
-- `group::Group` is private, so it is listed but cannot be created yet.
+- Online allocators are read live through `Allocator::pool_size`, `no_gpus` and `gpu_ref_count`.
 - `GPU::run` prints with `println!`, which goes nowhere in the browser; the event log records the call instead.

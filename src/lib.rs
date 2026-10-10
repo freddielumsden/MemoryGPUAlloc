@@ -2,5 +2,4 @@
 // the backend. Mirrors the module list in `main.rs`; no logic lives here.
 pub mod memory;
 pub mod gpu;
-pub mod group;
 pub mod allocator;

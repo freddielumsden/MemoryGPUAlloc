@@ -3,7 +3,8 @@
 use std::any::Any;
 
 use egui::{
-    Align2, Color32, CornerRadius, DragAndDrop, FontId, Frame, Margin, Response, RichText, Sense, Stroke, Ui, vec2,
+    Align2, Color32, CornerRadius, DragAndDrop, FontId, Frame, Id, LayerId, Margin, Order, Painter, Rect, Response,
+    RichText, Sense, Stroke, Ui, vec2,
 };
 
 use crate::theme;
@@ -85,50 +86,75 @@ pub fn badge(ui: &mut Ui, text: &str, color: Color32) -> Response {
         .response
 }
 
-/// A rounded hardware-style tile: coloured top strip, title, subtitle and an
-/// optional status LED.
-pub fn tile(ui: &mut Ui, size: egui::Vec2, color: Color32, title: &str, subtitle: &str, led: Option<bool>) -> Response {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let radius = CornerRadius::same(theme::RADIUS);
-        let hovered = response.hovered();
+/// What a hardware-style tile shows.
+pub struct Tile<'a> {
+    pub size: egui::Vec2,
+    pub color: Color32,
+    pub title: &'a str,
+    pub subtitle: &'a str,
+    /// Status LED in the corner: `Some(true)` green, `Some(false)` red.
+    pub led: Option<bool>,
+}
+
+impl Tile<'_> {
+    /// A static tile.
+    pub fn show(&self, ui: &mut Ui) -> Response {
+        let (rect, response) = ui.allocate_exact_size(self.size, Sense::hover());
+        if ui.is_rect_visible(rect) {
+            self.paint(ui.painter(), rect, response.hovered());
+        }
+        response
+    }
+
+    /// A tile that can be picked up, carrying `payload`.
+    ///
+    /// Unlike `Ui::dnd_drag_source` this allocates a single rect, so it wraps
+    /// correctly inside `horizontal_wrapped`. While dragged, a ghost copy
+    /// follows the pointer.
+    pub fn show_draggable<P: Any + Send + Sync>(&self, ui: &mut Ui, id: Id, payload: P) -> Response {
+        let (rect, _) = ui.allocate_exact_size(self.size, Sense::hover());
+        let response = ui.interact(rect, id, Sense::drag());
+        if response.dragged() {
+            DragAndDrop::set_payload(ui.ctx(), payload);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            self.paint(ui.painter(), rect, false);
+            if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                let painter = ui.ctx().layer_painter(LayerId::new(Order::Tooltip, id));
+                self.paint(&painter, Rect::from_center_size(pointer, self.size), true);
+            }
+        } else if ui.is_rect_visible(rect) {
+            self.paint(ui.painter(), rect, response.hovered());
+        }
+        response.on_hover_cursor(egui::CursorIcon::Grab)
+    }
+
+    fn paint(&self, painter: &Painter, rect: Rect, highlight: bool) {
+        let color = self.color;
         painter.rect(
             rect,
-            radius,
-            if hovered { theme::CARD.lerp_to_gamma(color, 0.12) } else { theme::CARD },
-            Stroke::new(1.0_f32, if hovered { color } else { color.linear_multiply(0.55) }),
+            CornerRadius::same(theme::RADIUS),
+            if highlight { theme::CARD.lerp_to_gamma(color, 0.12) } else { theme::CARD },
+            Stroke::new(1.0_f32, if highlight { color } else { color.linear_multiply(0.55) }),
             egui::StrokeKind::Inside,
         );
-        let strip = egui::Rect::from_min_size(rect.min, vec2(rect.width(), 4.0));
+        let strip = Rect::from_min_size(rect.min, vec2(rect.width(), 4.0));
         painter.rect_filled(strip, CornerRadius { nw: theme::RADIUS, ne: theme::RADIUS, sw: 0, se: 0 }, color);
         let text_center = rect.center() + vec2(0.0, 2.0);
-        if subtitle.is_empty() {
-            painter.text(text_center, Align2::CENTER_CENTER, title, FontId::monospace(11.0), theme::TEXT);
+        if self.subtitle.is_empty() {
+            painter.text(text_center, Align2::CENTER_CENTER, self.title, FontId::monospace(11.0), theme::TEXT);
         } else {
-            painter.text(
-                text_center - vec2(0.0, 6.0),
-                Align2::CENTER_CENTER,
-                title,
-                FontId::monospace(11.0),
-                theme::TEXT,
-            );
-            painter.text(
-                text_center + vec2(0.0, 7.0),
-                Align2::CENTER_CENTER,
-                subtitle,
-                FontId::proportional(9.5),
-                theme::TEXT_DIM,
-            );
+            let title_pos = text_center - vec2(0.0, 6.0);
+            painter.text(title_pos, Align2::CENTER_CENTER, self.title, FontId::monospace(11.0), theme::TEXT);
+            let sub_pos = text_center + vec2(0.0, 7.0);
+            painter.text(sub_pos, Align2::CENTER_CENTER, self.subtitle, FontId::proportional(9.5), theme::TEXT_DIM);
         }
-        if let Some(on) = led {
+        if let Some(on) = self.led {
             let c = rect.right_top() + vec2(-7.0, 10.0);
             let color = if on { theme::GPU } else { theme::DANGER };
             painter.circle_filled(c, 3.0, color);
             painter.circle_stroke(c, 5.0, Stroke::new(1.0_f32, color.linear_multiply(0.3)));
         }
     }
-    response
 }
 
 /// Lays out `count` fixed-width items in rows that fit the available width.

@@ -5,11 +5,14 @@ use std::collections::HashMap;
 
 use egui::{Align, Id, Layout, RichText, ScrollArea, Ui, vec2};
 
+use gpu_memory_alloc::allocator::Allocator;
+use gpu_memory_alloc::gpu::GPU;
+
 use crate::model::{
     AllocatorNode, AllocatorState, GpuLocation, NodeId, OpResult, PoolLocation, PoolNode, RefLocation, Workspace,
 };
 use crate::theme;
-use crate::widgets::{self, badge, card, drop_zone, inset, section_header, tile, wrap_grid};
+use crate::widgets::{self, Tile, badge, card, drop_zone, inset, section_header, wrap_grid};
 
 /// Anything that can be picked up with the mouse.
 #[derive(Clone, Copy, Debug)]
@@ -117,6 +120,7 @@ const TILE: egui::Vec2 = egui::vec2(58.0, 40.0);
 const SMALL_TILE: egui::Vec2 = egui::vec2(34.0, 26.0);
 const POOL_CARD_WIDTH: f32 = 236.0;
 const GPU_CELL_WIDTH: f32 = 150.0;
+const MIN_GPU_SLOT_WIDTH: f32 = 300.0;
 /// Rendering thousands of identical tiles helps nobody; the rest are summarised.
 const MAX_TILES: usize = 160;
 
@@ -298,17 +302,16 @@ fn target_zone<R>(
 // ------------------------------------------------------------------ top bar
 
 fn header_bar(ui: &mut Ui, ws: &Workspace) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("GPU MEMORY ALLOCATOR").strong().size(16.0).color(theme::TEXT));
         ui.label(RichText::new("control console").color(theme::TEXT_DIM));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let online = ws.allocators.iter().filter(|a| matches!(a.state, AllocatorState::Online { .. })).count();
-            stat(ui, "ONLINE", online, theme::ACCENT);
-            stat(ui, "ALLOCATORS", ws.allocators.len(), theme::ACCENT);
-            stat(ui, "GPUS FREE", ws.rack.len(), theme::GPU);
-            stat(ui, "POOLS", ws.pools.len(), theme::POOL);
-            stat(ui, "BLOCKS FREE", ws.tray.len(), theme::MEMORY);
-        });
+        ui.add_space(12.0);
+        let online = ws.allocators.iter().filter(|a| matches!(a.state, AllocatorState::Online { .. })).count();
+        stat(ui, "BLOCKS FREE", ws.tray.len(), theme::MEMORY);
+        stat(ui, "POOLS", ws.pools.len(), theme::POOL);
+        stat(ui, "GPUS FREE", ws.rack.len(), theme::GPU);
+        stat(ui, "ALLOCATORS", ws.allocators.len(), theme::ACCENT);
+        stat(ui, "ONLINE", online, theme::ACCENT);
     });
 }
 
@@ -339,11 +342,9 @@ fn memory_tray(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
             ui.horizontal_wrapped(|ui| {
                 for (i, mem_ref) in ws.tray.iter().take(MAX_TILES).enumerate() {
                     let size = format!("{} B", mem_ref.length());
-                    ui.dnd_drag_source(Id::new(("tray_ref", i)), Drag::Ref(RefLocation::Tray), |ui| {
-                        tile(ui, TILE, theme::MEMORY, "REF", &size, None)
-                    })
-                    .response
-                    .on_hover_text("MemRef — drag into a MemPool");
+                    Tile { size: TILE, color: theme::MEMORY, title: "REF", subtitle: &size, led: None }
+                        .show_draggable(ui, Id::new(("tray_ref", i)), Drag::Ref(RefLocation::Tray))
+                        .on_hover_text("MemRef — drag into a MemPool");
                 }
                 overflow_note(ui, ws.tray.len());
             });
@@ -397,11 +398,9 @@ fn pool_card(ui: &mut Ui, ws: &Workspace, state: &mut UiState, node: &PoolNode) 
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for i in 0..size.min(MAX_TILES) {
-                    ui.dnd_drag_source(Id::new(("pool_ref", id, i)), Drag::Ref(RefLocation::Pool(id)), |ui| {
-                        tile(ui, SMALL_TILE, theme::MEMORY, "", "", None)
-                    })
-                    .response
-                    .on_hover_text("MemRef — drag to another pool or back to memory blocks");
+                    Tile { size: SMALL_TILE, color: theme::MEMORY, title: "", subtitle: "", led: None }
+                        .show_draggable(ui, Id::new(("pool_ref", id, i)), Drag::Ref(RefLocation::Pool(id)))
+                        .on_hover_text("MemRef — drag to another pool or back to memory blocks");
                 }
                 overflow_note(ui, size);
             });
@@ -428,8 +427,8 @@ fn rack_section(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
 }
 
 fn gpu_tile(ui: &mut Ui, id: Id, location: GpuLocation, available: bool, subtitle: &str) {
-    ui.dnd_drag_source(id, Drag::Gpu(location), |ui| tile(ui, TILE, theme::GPU, "GPU", subtitle, Some(available)))
-        .response
+    Tile { size: TILE, color: theme::GPU, title: "GPU", subtitle, led: Some(available) }
+        .show_draggable(ui, id, Drag::Gpu(location))
         .on_hover_text(if available { "GPU — available" } else { "GPU — busy" });
 }
 
@@ -458,69 +457,36 @@ fn allocator_card(ui: &mut Ui, ws: &Workspace, state: &mut UiState, node: &Alloc
         ui.add_space(6.0);
         match &node.state {
             AllocatorState::Staging { gpus, pool } => staging_body(ui, ws, state, id, gpus, pool.as_ref()),
-            AllocatorState::Online { mirror, .. } => online_body(ui, state, id, mirror),
+            AllocatorState::Online { allocator } => online_body(ui, state, id, allocator),
         }
     });
 }
 
-fn staging_body(
-    ui: &mut Ui,
-    ws: &Workspace,
-    state: &mut UiState,
-    id: NodeId,
-    gpus: &[gpu_memory_alloc::gpu::GPU],
-    pool: Option<&PoolNode>,
-) {
-    ui.horizontal_top(|ui| {
-        let pool_width = POOL_CARD_WIDTH + 24.0;
-        let gpu_width = (ui.available_width() - pool_width - ui.spacing().item_spacing.x).max(160.0);
-
-        ui.allocate_ui_with_layout(vec2(gpu_width, 0.0), Layout::top_down(Align::Min), |ui| {
-            ui.set_width(gpu_width);
-            ui.label(
-                RichText::new(format!("GPUS · Vec<GPU> · {}", gpus.len())).small().strong().color(theme::TEXT_DIM),
-            );
-            target_zone(ui, ws, state, inset(), Target::AllocGpus(id), |ui, _| {
-                ui.set_width(ui.available_width());
-                ui.set_min_height(TILE.y);
-                if gpus.is_empty() {
-                    ui.label(RichText::new("drop GPUs here from the rack").color(theme::TEXT_DIM));
-                    return;
-                }
-                ui.horizontal_wrapped(|ui| {
-                    for (i, gpu) in gpus.iter().take(MAX_TILES).enumerate() {
-                        let index = i.to_string();
-                        gpu_tile(
-                            ui,
-                            Id::new(("staged_gpu", id, i)),
-                            GpuLocation::Allocator(id),
-                            gpu.is_available(),
-                            &index,
-                        );
-                    }
-                    overflow_note(ui, gpus.len());
-                });
+fn staging_body(ui: &mut Ui, ws: &Workspace, state: &mut UiState, id: NodeId, gpus: &[GPU], pool: Option<&PoolNode>) {
+    // Flex-style: GPU and pool slots sit side by side when there is room and
+    // stack when there is not.
+    let pool_width = POOL_CARD_WIDTH + 24.0;
+    let spacing = ui.spacing().item_spacing.x;
+    if ui.available_width() >= MIN_GPU_SLOT_WIDTH + spacing + pool_width {
+        ui.horizontal_top(|ui| {
+            let gpu_width = ui.available_width() - pool_width - spacing;
+            ui.allocate_ui_with_layout(vec2(gpu_width, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(gpu_width);
+                staged_gpus_slot(ui, ws, state, id, gpus);
+            });
+            ui.allocate_ui_with_layout(vec2(pool_width, 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(pool_width);
+                staged_pool_slot(ui, ws, state, id, pool);
             });
         });
-
-        ui.allocate_ui_with_layout(vec2(pool_width, 0.0), Layout::top_down(Align::Min), |ui| {
-            ui.set_width(pool_width);
-            ui.label(RichText::new("POOL · MemPool").small().strong().color(theme::TEXT_DIM));
-            target_zone(ui, ws, state, inset(), Target::AllocPoolSlot(id), |ui, state| {
-                ui.set_width(ui.available_width());
-                ui.set_min_height(TILE.y);
-                match pool {
-                    Some(node) => pool_card(ui, ws, state, node),
-                    None => {
-                        ui.label(RichText::new("drop a MemPool here").color(theme::TEXT_DIM));
-                    }
-                }
-            });
-        });
-    });
+    } else {
+        staged_gpus_slot(ui, ws, state, id, gpus);
+        ui.add_space(6.0);
+        staged_pool_slot(ui, ws, state, id, pool);
+    }
 
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button(RichText::new("▶ Initialise").strong()).clicked() {
             state.commands.push(Command::Initialise(id));
         }
@@ -532,30 +498,62 @@ fn staging_body(
     });
 }
 
-fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, mirror: &crate::model::AllocatorMirror) {
+fn staged_gpus_slot(ui: &mut Ui, ws: &Workspace, state: &mut UiState, id: NodeId, gpus: &[GPU]) {
+    ui.label(RichText::new(format!("GPUS · Vec<GPU> · {}", gpus.len())).small().strong().color(theme::TEXT_DIM));
+    target_zone(ui, ws, state, inset(), Target::AllocGpus(id), |ui, _| {
+        ui.set_width(ui.available_width());
+        ui.set_min_height(TILE.y);
+        if gpus.is_empty() {
+            ui.label(RichText::new("drop GPUs here from the rack").color(theme::TEXT_DIM));
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            for (i, gpu) in gpus.iter().take(MAX_TILES).enumerate() {
+                let index = i.to_string();
+                gpu_tile(ui, Id::new(("staged_gpu", id, i)), GpuLocation::Allocator(id), gpu.is_available(), &index);
+            }
+            overflow_note(ui, gpus.len());
+        });
+    });
+}
+
+fn staged_pool_slot(ui: &mut Ui, ws: &Workspace, state: &mut UiState, id: NodeId, pool: Option<&PoolNode>) {
+    ui.label(RichText::new("POOL · MemPool").small().strong().color(theme::TEXT_DIM));
+    target_zone(ui, ws, state, inset(), Target::AllocPoolSlot(id), |ui, state| {
+        ui.set_width(ui.available_width());
+        ui.set_min_height(TILE.y);
+        match pool {
+            Some(node) => pool_card(ui, ws, state, node),
+            None => {
+                ui.label(RichText::new("drop a MemPool here").color(theme::TEXT_DIM));
+            }
+        }
+    });
+}
+
+fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocator) {
+    let pool_size = allocator.pool_size();
     // Internal pool: drag a token from it onto a GPU to allocate one ref.
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("INTERNAL POOL").small().strong().color(theme::TEXT_DIM));
-        if mirror.pool_size > 0 {
-            ui.dnd_drag_source(Id::new(("pool_token", id)), Drag::PoolToken(id), |ui| {
-                tile(ui, TILE, theme::POOL, &mirror.pool_size.to_string(), "refs", None)
-            })
-            .response
-            .on_hover_text("Drag onto a GPU to allocate(1, gpu)");
+        if pool_size > 0 {
+            Tile { size: TILE, color: theme::POOL, title: &pool_size.to_string(), subtitle: "refs", led: None }
+                .show_draggable(ui, Id::new(("pool_token", id)), Drag::PoolToken(id))
+                .on_hover_text("Drag onto a GPU to allocate(1, gpu)");
             ui.label(RichText::new("drag onto a GPU to allocate one ref").small().color(theme::TEXT_DIM));
         } else {
-            tile(ui, TILE, theme::BORDER, "0", "refs", None);
+            Tile { size: TILE, color: theme::BORDER, title: "0", subtitle: "refs", led: None }.show(ui);
             ui.label(RichText::new("pool exhausted").small().color(theme::TEXT_DIM));
         }
     });
     ui.add_space(6.0);
 
-    let gpu_count = mirror.gpu_refs.len();
+    let gpu_count = allocator.no_gpus();
     if gpu_count == 0 {
         ui.label(RichText::new("This allocator was initialised without GPUs.").color(theme::TEXT_DIM));
     }
     wrap_grid(ui, gpu_count, GPU_CELL_WIDTH, |ui, gpu| {
-        let refs = mirror.gpu_refs[gpu];
+        let refs = allocator.gpu_ref_count(gpu).unwrap_or(0);
         let (_, dropped) = drop_zone(
             ui,
             inset(),
@@ -582,7 +580,7 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, mirror: &crate::mod
     ui.add_space(8.0);
     let inputs = state.alloc_inputs.entry(id).or_default();
     let mut queued = Vec::new();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("SIZE").small().strong().color(theme::TEXT_DIM));
         let size = widgets::count_input(ui, &mut inputs.size);
         ui.label(RichText::new("GPU").small().strong().color(theme::TEXT_DIM));
@@ -662,20 +660,6 @@ fn components_panel(ui: &mut Ui, ws: &Workspace, state: &mut UiState) {
         });
         ui.add_space(6.0);
     }
-
-    card().show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Group").strong().color(theme::TEXT_DIM));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| badge(ui, "PRIVATE", theme::TEXT_DIM));
-        });
-        ui.label(RichText::new("group::Group").monospace().small().color(theme::TEXT_DIM));
-        ui.label(
-            RichText::new("Not public in the backend yet, so it cannot be created from the UI.")
-                .small()
-                .color(theme::TEXT_DIM),
-        );
-    });
 
     ui.add_space(10.0);
     ui.label(

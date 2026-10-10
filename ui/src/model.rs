@@ -17,21 +17,11 @@ pub struct PoolNode {
     pub pool: MemPool,
 }
 
-/// What the backend allocator currently holds, as far as the UI can tell.
-///
-/// `Allocator` keeps its fields private and exposes no getters, so the UI
-/// records the effect of every *successful* backend call here. This is display
-/// data only; the backend remains the source of truth for every decision.
-pub struct AllocatorMirror {
-    pub pool_size: usize,
-    pub gpu_refs: Vec<usize>,
-}
-
 pub enum AllocatorState {
     /// Being configured: GPUs and a pool can still be dragged in and out.
     Staging { gpus: Vec<GPU>, pool: Option<PoolNode> },
     /// `Allocator::new` has been called; configuration is locked.
-    Online { allocator: Allocator, mirror: AllocatorMirror },
+    Online { allocator: Allocator },
 }
 
 pub struct AllocatorNode {
@@ -202,9 +192,9 @@ impl Workspace {
         }
     }
 
-    fn online_mut(&mut self, id: NodeId) -> OpResult<(&mut Allocator, &mut AllocatorMirror)> {
+    fn online_mut(&mut self, id: NodeId) -> OpResult<&mut Allocator> {
         match &mut self.allocator_mut(id)?.state {
-            AllocatorState::Online { allocator, mirror } => Ok((allocator, mirror)),
+            AllocatorState::Online { allocator } => Ok(allocator),
             AllocatorState::Staging { .. } => Err(format!("allocator #{id} has not been initialised")),
         }
     }
@@ -281,41 +271,26 @@ impl Workspace {
         let (gpus, pool) = self.staging_mut(id)?;
         let gpus = std::mem::take(gpus);
         let pool = pool.take().map(|p| p.pool).unwrap_or_else(MemPool::new);
-        let node = self.allocator_mut(id)?;
-        let mirror = AllocatorMirror { pool_size: pool.size(), gpu_refs: vec![0; gpus.len()] };
-        node.state = AllocatorState::Online { allocator: Allocator::new(gpus, pool), mirror };
+        self.allocator_mut(id)?.state = AllocatorState::Online { allocator: Allocator::new(gpus, pool) };
         Ok(())
     }
 
     pub fn allocate(&mut self, id: NodeId, size: usize, gpu_index: usize) -> OpResult {
-        let (allocator, mirror) = self.online_mut(id)?;
-        allocator.allocate(size, gpu_index).ok_or_else(|| format!("backend rejected allocate({size}, {gpu_index})"))?;
-        mirror.pool_size -= size;
-        mirror.gpu_refs[gpu_index] += size;
-        Ok(())
+        self.online_mut(id)?
+            .allocate(size, gpu_index)
+            .ok_or_else(|| format!("backend rejected allocate({size}, {gpu_index})"))
     }
 
     pub fn allocate_evenly(&mut self, id: NodeId, size: usize) -> OpResult {
-        let (allocator, mirror) = self.online_mut(id)?;
-        allocator.allocate_evenly(size).ok_or_else(|| format!("backend rejected allocate_evenly({size})"))?;
-        // Same split the backend uses: the first `size % n` GPUs get one extra.
-        let n = mirror.gpu_refs.len();
-        for (i, refs) in mirror.gpu_refs.iter_mut().enumerate() {
-            *refs += size / n + usize::from(i < size % n);
-        }
-        mirror.pool_size -= size;
-        Ok(())
+        self.online_mut(id)?.allocate_evenly(size).ok_or_else(|| format!("backend rejected allocate_evenly({size})"))
     }
 
     pub fn deallocate(&mut self, id: NodeId, gpu_index: usize) -> OpResult {
-        let (allocator, mirror) = self.online_mut(id)?;
-        allocator.deallocate(gpu_index).ok_or_else(|| format!("backend rejected deallocate({gpu_index})"))?;
-        mirror.pool_size += std::mem::take(&mut mirror.gpu_refs[gpu_index]);
-        Ok(())
+        self.online_mut(id)?.deallocate(gpu_index).ok_or_else(|| format!("backend rejected deallocate({gpu_index})"))
     }
 
     pub fn run(&mut self, id: NodeId) -> OpResult {
-        self.online_mut(id)?.0.run();
+        self.online_mut(id)?.run();
         Ok(())
     }
 }
@@ -340,13 +315,15 @@ mod tests {
         ws.allocate_evenly(alloc_id, 18).unwrap();
         ws.run(alloc_id).unwrap();
 
-        let AllocatorState::Online { mirror, .. } = &ws.allocators[0].state else { panic!() };
-        assert_eq!(mirror.gpu_refs, vec![3, 3, 2, 2, 2, 2, 2, 2]);
-        assert_eq!(mirror.pool_size, 0);
+        let AllocatorState::Online { allocator } = &ws.allocators[0].state else { panic!() };
+        let refs: Vec<_> = (0..allocator.no_gpus()).map(|i| allocator.gpu_ref_count(i).unwrap_or(0)).collect();
+        assert_eq!(refs, vec![3, 3, 2, 2, 2, 2, 2, 2]);
+        assert_eq!(allocator.pool_size(), 0);
 
         ws.deallocate(alloc_id, 0).unwrap();
-        let AllocatorState::Online { mirror, .. } = &ws.allocators[0].state else { panic!() };
-        assert_eq!(mirror.pool_size, 3);
+        let AllocatorState::Online { allocator } = &ws.allocators[0].state else { panic!() };
+        assert_eq!(allocator.pool_size(), 3);
+        assert_eq!(allocator.gpu_ref_count(0), None);
         assert!(ws.allocate(alloc_id, 4, 1).is_err());
     }
 
