@@ -31,7 +31,7 @@ impl GPU {
 
 }
 
-fn randomise(x: u8) -> u8 {
+fn randomise(_: u8) -> u8 {
     let mut rng: SmallRng = rand::make_rng();
     let value: u8 = rng.random_range(0..=255);
 

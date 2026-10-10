@@ -85,4 +85,14 @@ impl Allocator {
             }
         }
     }
+
+    pub fn get_ref_vals(&self) -> Vec<Vec<u8>> {
+        let mut ref_vals = Vec::new();
+        for gpu_index in 0..self.gpus.len() {
+            if let Some(mem_refs) = self.map.get(&gpu_index) {
+                ref_vals.extend(mem_refs.iter().map(|v| v.read()));
+            }
+        }
+        ref_vals
+    }
 }

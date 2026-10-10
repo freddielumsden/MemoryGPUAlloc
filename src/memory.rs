@@ -38,14 +38,10 @@ impl MemRef {
         memory.length()
     }
 
-    pub fn read(&self, index: usize) -> Option<u8> {
+    pub fn read(&self) -> Vec<u8> {
         let memory = self.memory.lock().expect("failed to access memory");
 
-        if index < memory.data.len() {
-            Some(memory.data[index])
-        } else {
-            None
-        }
+        memory.data.clone()
     }
 
     pub fn write(&mut self, index: usize, value: u8) -> Result<(), &'static str> {
