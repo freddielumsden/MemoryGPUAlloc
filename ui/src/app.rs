@@ -736,6 +736,7 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
     let inputs = state.alloc_inputs.entry(id).or_default();
     let mut queued = Vec::new();
     let mut run_rect = None;
+    let mut allocate_rect = None;
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("SIZE").small().strong().color(theme::text_dim()));
         let size = widgets::count_input(ui, &mut inputs.size);
@@ -751,7 +752,9 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
         );
         ui.separator();
         let has_size = size.is_some();
-        if ui.add_enabled(has_size && gpu_count > 0, egui::Button::new("Allocate")).clicked() {
+        let response = ui.add_enabled(has_size && gpu_count > 0, egui::Button::new("Allocate"));
+        allocate_rect = Some(response.rect);
+        if response.clicked() {
             queued.push(Command::Allocate(id, size.unwrap_or(0), inputs.gpu));
         }
         if ui.add_enabled(has_size, egui::Button::new("Allocate evenly")).clicked() {
@@ -767,6 +770,9 @@ fn online_body(ui: &mut Ui, state: &mut UiState, id: NodeId, allocator: &Allocat
         }
     });
     state.commands.extend(queued);
+    if let Some(rect) = allocate_rect {
+        state.mark(ui, Spot::Allocate(id), rect);
+    }
     if let Some(rect) = run_rect {
         state.mark(ui, Spot::Run(id), rect);
     }

@@ -9,20 +9,22 @@ pub enum Step {
     PoolToAllocator,
     GpuToAllocator,
     Initialise,
+    Allocate,
     Run,
     Done,
 }
 
 impl Step {
-    const ORDER: [Step; 5] =
-        [Step::RefToPool, Step::PoolToAllocator, Step::GpuToAllocator, Step::Initialise, Step::Run];
+    const ORDER: [Step; 6] =
+        [Step::RefToPool, Step::PoolToAllocator, Step::GpuToAllocator, Step::Initialise, Step::Allocate, Step::Run];
 
     fn next(self) -> Step {
         match self {
             Step::RefToPool => Step::PoolToAllocator,
             Step::PoolToAllocator => Step::GpuToAllocator,
             Step::GpuToAllocator => Step::Initialise,
-            Step::Initialise => Step::Run,
+            Step::Initialise => Step::Allocate,
+            Step::Allocate => Step::Run,
             Step::Run | Step::Done => Step::Done,
         }
     }
@@ -40,6 +42,7 @@ pub enum Spot {
     FirstRackGpu,
     AllocGpuSlot(NodeId),
     Initialise(NodeId),
+    Allocate(NodeId),
     Run(NodeId),
 }
 
@@ -82,7 +85,11 @@ impl Tutorial {
             }
             Step::GpuToAllocator => ("Attach a GPU", "Drag a GPU from the rack into the allocator's GPU slot."),
             Step::Initialise => ("Initialise", "Lock the configuration by calling Allocator::new()."),
-            Step::Run => ("Run", "Allocate if you like, then run the allocator on its GPUs."),
+            Step::Allocate => (
+                "Allocate memory",
+                "Hand refs from the allocator's pool to a GPU: press Allocate, or drag the pool tile onto a GPU.",
+            ),
+            Step::Run => ("Run", "Run the allocator; each GPU rewrites its refs and their colours change."),
             Step::Done => ("Walkthrough complete", "You have assembled and run an allocator."),
         }
     }
@@ -114,6 +121,12 @@ impl Tutorial {
                     )
             }
             Step::Initialise => online,
+            Step::Allocate => ws.allocators.iter().any(|a| match &a.state {
+                AllocatorState::Online { allocator } => {
+                    (0..allocator.no_gpus()).any(|gpu| allocator.gpu_ref_count(gpu).is_some_and(|n| n > 0))
+                }
+                AllocatorState::Staging { .. } => false,
+            }),
             Step::Run => self.ran,
             Step::Done => true,
         }
@@ -147,9 +160,10 @@ impl Tutorial {
                 spots.extend(alloc.map(Spot::AllocGpuSlot));
             }
             Step::Initialise => spots.extend(alloc.map(Spot::Initialise)),
-            Step::Run => {
+            Step::Allocate | Step::Run => {
                 let online = ws.allocators.iter().find(|a| matches!(a.state, AllocatorState::Online { .. }));
-                spots.extend(online.map(|a| Spot::Run(a.id)));
+                let spot = if self.step == Step::Allocate { Spot::Allocate } else { Spot::Run };
+                spots.extend(online.map(|a| spot(a.id)));
             }
             Step::Done => {}
         }
@@ -202,6 +216,10 @@ mod tests {
         assert_eq!(t.spots(&ws), vec![Spot::Initialise(alloc)]);
 
         ws.initialise(alloc).unwrap();
+        t.update(&ws);
+        assert_eq!(t.spots(&ws), vec![Spot::Allocate(alloc)]);
+
+        ws.allocate(alloc, 1, 0).unwrap();
         t.update(&ws);
         assert_eq!(t.spots(&ws), vec![Spot::Run(alloc)]);
 
